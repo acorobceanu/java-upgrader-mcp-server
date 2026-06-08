@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Blocks git push if potential secrets are found in the outgoing commits.
+# Patterns mirror SecretScanner.java — keep them in sync when adding patterns.
+# Auto-installed on every mvn initialize (see pom.xml maven-antrun-plugin).
+# Emergency bypass: git push --no-verify
+
+set -uo pipefail
+
+# Structured secrets — POSIX ERE (grep -E) compatible
+PATTERNS=(
+    'ghp_[A-Za-z0-9]{36}'
+    'github_pat_[A-Za-z0-9_]{82}'
+    'ghs_[A-Za-z0-9]{36}'
+    'AKIA[0-9A-Z]{16}'
+    'sk-ant-api[0-9A-Za-z_-]{90,}'
+    '-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY'
+)
+# Keyword=value assignments (case-insensitive)
+KEYWORD_INCLUDE='(password|passwd|secret|api[_.]?key|access[_.]?key|auth[_.]?token)[[:space:]]*[=:][[:space:]]*[A-Za-z0-9+/=_-]{12,}'
+# Exclude template placeholders like ${DB_PASS}, <value>, ***masked***
+KEYWORD_EXCLUDE='[=:][[:space:]]*\$\{|[=:][[:space:]]*<[a-zA-Z]|[=:][[:space:]]*\*{3}'
+
+findings=()
+
+is_secret() {
+    local content="$1"
+    for pattern in "${PATTERNS[@]}"; do
+        echo "$content" | grep -qE "$pattern" && return 0
+    done
+    if echo "$content" | grep -iqE "$KEYWORD_INCLUDE"; then
+        echo "$content" | grep -qE "$KEYWORD_EXCLUDE" || return 0
+    fi
+    return 1
+}
+
+scan_diff() {
+    while IFS= read -r line; do
+        [[ "$line" =~ ^\+\+\+ ]] && continue
+        [[ "$line" =~ ^\+ ]]    || continue
+        local content="${line:1}"
+        is_secret "$content" && findings+=("  $content")
+    done
+}
+
+while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
+    [[ "$local_sha" == "0000000000000000000000000000000000000000" ]] && continue
+
+    if [[ "$remote_sha" == "0000000000000000000000000000000000000000" ]]; then
+        # New branch — scan commits not yet on any remote
+        scan_diff < <(git log -p --not --remotes "$local_sha" 2>/dev/null)
+    else
+        scan_diff < <(git log -p "${remote_sha}..${local_sha}" 2>/dev/null)
+    fi
+done
+
+if [[ ${#findings[@]} -gt 0 ]]; then
+    echo "Push blocked — ${#findings[@]} potential secret(s) in outgoing commits:" >&2
+    printf '%s\n' "${findings[@]}" >&2
+    printf '\nRemove the credentials and commit again.\n' >&2
+    printf 'Emergency bypass: git push --no-verify\n' >&2
+    exit 1
+fi
+
+exit 0

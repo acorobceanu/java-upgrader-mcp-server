@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="maven-antrun-" default="main">
+  <target name="main">
+    <copy file="/Users/acorobceanu/Documents/claude/java-upgrader/.githooks/pre-push" tofile="/Users/acorobceanu/Documents/claude/java-upgrader/.git/hooks/pre-push" failonerror="false" overwrite="true" />
+    <chmod file="/Users/acorobceanu/Documents/claude/java-upgrader/.git/hooks/pre-push" perm="755" failonerror="false" />
+  </target>
+</project>
