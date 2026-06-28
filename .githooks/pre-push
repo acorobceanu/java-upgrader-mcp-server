@@ -25,10 +25,10 @@ findings=()
 is_secret() {
     local content="$1"
     for pattern in "${PATTERNS[@]}"; do
-        echo "$content" | grep -qE "$pattern" && return 0
+        echo "$content" | grep -qE -- "$pattern" && return 0
     done
-    if echo "$content" | grep -iqE "$KEYWORD_INCLUDE"; then
-        echo "$content" | grep -qE "$KEYWORD_EXCLUDE" || return 0
+    if echo "$content" | grep -iqE -- "$KEYWORD_INCLUDE"; then
+        echo "$content" | grep -qE -- "$KEYWORD_EXCLUDE" || return 0
     fi
     return 1
 }
