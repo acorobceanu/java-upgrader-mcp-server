@@ -1,12 +1,12 @@
 package com.javaupgrader.config;
 
-import com.anthropic.client.AnthropicClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
@@ -18,7 +18,14 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK,
-                properties = "GITHUB_TOKEN=test-token")
+                properties = {
+                    "GITHUB_TOKEN=test-token",
+                    // Prevent Spring AI LLM auto-configuration from activating: both
+                    // AnthropicChatAutoConfiguration and OpenAiChatAutoConfiguration guard on
+                    // spring.ai.model.chat matching their provider name. Setting it to "none"
+                    // skips all chat-model auto-configuration so no API key is required.
+                    "spring.ai.model.chat=none"
+                })
 class SecurityConfigTest {
 
     @Autowired
@@ -33,13 +40,15 @@ class SecurityConfigTest {
             .build();
     }
 
-    // Replaces the auto-configured decoder so no real JWKS endpoint is needed
+    // Replaces the auto-configured decoder so no real JWKS endpoint is needed.
     @MockitoBean
     JwtDecoder jwtDecoder;
 
-    // Avoids requiring ANTHROPIC_API_KEY in the test environment
+    // ChatClient is an interface, so Mockito can mock it without issue.
+    // LlmConfig.anthropicChatClient() is @ConditionalOnMissingBean(ChatClient.class), so it
+    // defers to this mock — no AnthropicChatModel (a final class that can't be mocked) needed.
     @MockitoBean
-    AnthropicClient anthropicClient;
+    ChatClient chatClient;
 
     @Test
     void sseEndpoint_withoutToken_returns401() throws Exception {

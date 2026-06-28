@@ -39,11 +39,16 @@
             <artifactId>spring-ai-starter-mcp-server-webmvc</artifactId>
         </dependency>
 
-        <!-- Anthropic Java SDK (brings OkHttp, Jackson transitively) -->
+        <!-- Anthropic Claude (used when llm.provider=anthropic) -->
         <dependency>
-            <groupId>com.anthropic</groupId>
-            <artifactId>anthropic-java</artifactId>
-            <version>2.34.0</version>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-model-anthropic</artifactId>
+        </dependency>
+
+        <!-- OpenAI GPT (used when llm.provider=openai) -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-model-openai</artifactId>
         </dependency>
 
         <!-- AWS SSM Parameter Store (optional — used when github.token.ssm-path is set) -->

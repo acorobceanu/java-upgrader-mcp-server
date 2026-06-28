@@ -1,6 +1,8 @@
 # java-upgrader
 
-An MCP server that automatically upgrades Java projects to modern Java versions using an AI agent powered by Claude. Connect it to Claude Desktop (or any MCP client), point it at a GitHub repository, and it clones the project, applies Java modernizations, and opens a pull request with the changes.
+An MCP server that automatically upgrades Java projects to modern Java versions using an AI agent. Connect it to Claude Desktop, Claude Code, or any MCP client, point it at a GitHub repository, and it clones the project, applies Java modernizations, and opens a pull request with the changes.
+
+Supports **Anthropic Claude** and **OpenAI GPT** as the underlying LLM — switchable via a single configuration property.
 
 ## How It Works
 
@@ -9,13 +11,14 @@ An MCP server that automatically upgrades Java projects to modern Java versions 
 3. **Agent runs** asynchronously in the background: clones the repo, inspects the project, applies upgrades
 4. **Pull request** is opened on the target repository with all changes
 
-The AI agent (Claude Opus) has four tools: read files, write files, list files, and execute shell commands. It uses these to update `pom.xml`/`build.gradle`, apply modern Java language features, and report every change it makes.
+The AI agent has four tools: read files, write files, list files, and execute shell commands. It uses these to update `pom.xml`/`build.gradle`, apply modern Java language features, and report every change it makes.
 
 Upgrades run on a single background worker thread so concurrent calls queue rather than competing for disk and API quota.
 
 ## Features
 
 - **MCP tool interface** — callable from Claude Desktop, Claude Code, or any MCP-compatible client
+- **Multi-provider LLM support** — Anthropic Claude or OpenAI GPT, configured via a single property
 - **Modern Java patterns** — applies `var`, text blocks, records, pattern matching, sealed classes, Stream API improvements, and more
 - **Configurable target version** — defaults to Java 21, configurable per call
 - **Automatic PRs and issues** — opens a PR on success, a GitHub issue with diagnostics on failure
@@ -25,12 +28,13 @@ Upgrades run on a single background worker thread so concurrent calls queue rath
 
 ## Prerequisites
 
-| Requirement | Version |
+| Requirement | Details |
 |---|---|
 | Java | 17+ |
 | Maven | 3.6+ |
-| `ANTHROPIC_API_KEY` | Anthropic API key |
 | `GITHUB_TOKEN` | GitHub personal access token with `repo` and `issues` scope |
+| `ANTHROPIC_API_KEY` | Required when `llm.provider=anthropic` (default) |
+| `OPENAI_API_KEY` | Required when `llm.provider=openai` |
 
 ## Quick Start
 
@@ -40,12 +44,23 @@ git clone https://github.com/acorobceanu/java-upgrader.git
 cd java-upgrader
 mvn clean install
 
-# Set required environment variables
-export ANTHROPIC_API_KEY=sk-ant-...
+# Set the GitHub token (always required)
 export GITHUB_TOKEN=ghp_...
+
+# Set the API key for your chosen LLM provider
+export ANTHROPIC_API_KEY=sk-ant-...   # if using Anthropic (default)
+# export OPENAI_API_KEY=sk-...        # if using OpenAI
 
 # Start the MCP server on port 8080
 mvn spring-boot:run
+```
+
+To switch providers, set `llm.provider` before starting:
+
+```bash
+# Use OpenAI instead of Anthropic
+export OPENAI_API_KEY=sk-...
+mvn spring-boot:run -Dspring-boot.run.arguments=--llm.provider=openai
 ```
 
 The server starts and exposes the MCP SSE transport at `http://localhost:8080/sse`.
@@ -164,6 +179,20 @@ Upgrade to Java 21 complete. Pull request: https://github.com/acme/legacy-java8-
 
 All configuration lives in `src/main/resources/application.properties`.
 
+### LLM Provider
+
+| Property | Default | Description |
+|---|---|---|
+| `llm.provider` | `anthropic` | LLM backend: `anthropic` or `openai` |
+| `spring.ai.anthropic.api-key` | `${ANTHROPIC_API_KEY:}` | Anthropic API key (used when `llm.provider=anthropic`) |
+| `spring.ai.anthropic.chat.options.model` | `claude-opus-4-8` | Anthropic model name |
+| `spring.ai.openai.api-key` | `${OPENAI_API_KEY:}` | OpenAI API key (used when `llm.provider=openai`) |
+| `spring.ai.openai.chat.options.model` | `gpt-4o` | OpenAI model name |
+
+Only set the API key for the provider you're using. Setting both is harmless but the inactive provider's key is ignored.
+
+### Other
+
 | Property | Default | Description |
 |---|---|---|
 | `server.port` | `8080` | HTTP port |
@@ -203,7 +232,7 @@ java-upgrader/
     ├── main/java/com/javaupgrader/
     │   ├── JavaUpgraderApplication.java
     │   ├── agent/
-    │   │   └── JavaUpgraderAgent.java       # Claude agent + file/shell tool definitions
+    │   │   └── JavaUpgraderAgent.java       # AI agent + file/shell tool definitions
     │   ├── mcp/
     │   │   └── JavaUpgraderTools.java       # MCP tools: upgrade_java, get_upgrade_status
     │   ├── service/
@@ -213,14 +242,16 @@ java-upgrader/
     │   │   ├── GitHubService.java           # GitHub API + git operations
     │   │   └── SecretScanner.java           # Pre-push secret detection
     │   └── config/
-    │       ├── AnthropicConfig.java
+    │       ├── LlmConfig.java               # ChatClient bean — selects Anthropic or OpenAI provider
     │       └── GitHubTokenConfig.java
     └── test/java/com/javaupgrader/
         ├── config/SecurityConfigTest.java
+        ├── agent/JavaUpgraderAgentTest.java
         ├── mcp/JavaUpgraderToolsTest.java
         └── service/
             ├── JobStoreTest.java
             ├── UpgradeJobServiceTest.java
+            ├── UpgradeOrchestrationServiceTest.java
             ├── GitHubServiceTest.java
             └── SecretScannerTest.java
 ```
@@ -247,8 +278,9 @@ The service packages as a single executable JAR. For production use on AWS Light
 
 1. Attach an IAM instance profile with `ssm:GetParameter` on your token path.
 2. Set `github.token.ssm-path=/your/ssm/param` in `application.properties` or as a system property.
-3. Set `ANTHROPIC_API_KEY` in the environment.
-4. Run the JAR: `java -jar java-upgrader-1.0-SNAPSHOT.jar`
+3. Set the API key for your chosen LLM provider (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`) in the environment.
+4. Set `llm.provider=anthropic` or `llm.provider=openai` (or accept the default `anthropic`).
+5. Run the JAR: `java -jar java-upgrader-1.0-SNAPSHOT.jar`
 
 No `GITHUB_TOKEN` environment variable is needed when SSM is configured.
 
