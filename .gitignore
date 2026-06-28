@@ -15,5 +15,8 @@ Thumbs.db
 .env
 .netrc
 
+# Security review approval stamp (written by code-security-reviewer agent)
+.security-review
+
 # Claude Code internal
 .claude/

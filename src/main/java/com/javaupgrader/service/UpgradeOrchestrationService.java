@@ -1,11 +1,8 @@
 package com.javaupgrader.service;
 
 import com.javaupgrader.agent.JavaUpgraderAgent;
-import com.javaupgrader.dto.JobStatus;
-import com.javaupgrader.dto.UpgradeRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
@@ -14,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 
 @Service
@@ -23,28 +21,30 @@ public class UpgradeOrchestrationService {
 
     private final GitHubService gitHubService;
     private final JavaUpgraderAgent upgraderAgent;
-    private final JobStore jobStore;
     private final SecretScanner secretScanner;
 
     public UpgradeOrchestrationService(GitHubService gitHubService, JavaUpgraderAgent upgraderAgent,
-                                       JobStore jobStore, SecretScanner secretScanner) {
+                                       SecretScanner secretScanner) {
         this.gitHubService = gitHubService;
         this.upgraderAgent = upgraderAgent;
-        this.jobStore = jobStore;
         this.secretScanner = secretScanner;
     }
 
-    @Async("upgradeExecutor")
-    public void upgrade(UpgradeRequest request, String jobId) {
-        int targetVersion = request.effectiveTargetVersion();
+    /**
+     * Clones {@code githubUrl}, runs the AI upgrade agent, commits and pushes the changes,
+     * and opens a pull request. Returns a human-readable result string.
+     *
+     * Throws {@link RuntimeException} on failure (MCP framework surfaces this as an isError response).
+     */
+    public String upgrade(String githubUrl, int targetJavaVersion) {
         GitHubService.RepoInfo repo = null;
         Path baseDir = null;
         Path credHome = null;  // temporary HOME containing .netrc — never appears in process listings
 
         try {
-            repo = GitHubService.parseUrl(request.githubUrl());
+            repo = GitHubService.parseUrl(githubUrl);
             String defaultBranch = gitHubService.getDefaultBranch(repo);
-            log.info("Upgrading {}/{} → Java {} [job={}]", repo.owner(), repo.repo(), targetVersion, jobId);
+            log.info("Upgrading {}/{} → Java {}", repo.owner(), repo.repo(), targetJavaVersion);
 
             // Write credentials to a temp dir used as HOME for all git commands.
             // The token lives in a 600-permission .netrc file, not in any command argument.
@@ -53,26 +53,27 @@ public class UpgradeOrchestrationService {
             Map<String, String> gitEnv = Map.of("HOME", credHome.toString());
 
             baseDir = Files.createTempDirectory("java-upgrader-");
-            runCommand(baseDir, "git clone --depth 1 " + gitHubService.getPlainCloneUrl(repo) + " repo", gitEnv);
+            String cloneUrl = gitHubService.getPlainCloneUrl(repo);
+            runCommand(baseDir, List.of("git", "clone", "--depth", "1", cloneUrl, "repo"), gitEnv);
 
             Path cloneDir = baseDir.resolve("repo");
-            runCommand(cloneDir, "git config user.email 'java-upgrader@bot.local'", gitEnv);
-            runCommand(cloneDir, "git config user.name 'Java Upgrader Bot'", gitEnv);
+            runCommand(cloneDir, List.of("git", "config", "user.email", "java-upgrader@bot.local"), gitEnv);
+            runCommand(cloneDir, List.of("git", "config", "user.name", "Java Upgrader Bot"), gitEnv);
 
-            String branchName = "java-upgrade-to-" + targetVersion;
-            runCommand(cloneDir, "git checkout -b " + branchName, gitEnv);
+            String branchName = "java-upgrade-to-" + targetJavaVersion;
+            runCommand(cloneDir, List.of("git", "checkout", "-b", branchName), gitEnv);
 
-            String agentSummary = upgraderAgent.run(cloneDir.toString(), targetVersion);
+            String agentSummary = upgraderAgent.run(cloneDir.toString(), targetJavaVersion);
 
-            String gitStatus = runCommand(cloneDir, "git status --porcelain", gitEnv);
+            String gitStatus = runCommand(cloneDir, List.of("git", "status", "--porcelain"), gitEnv);
             if (gitStatus.isBlank()) {
-                log.info("No changes for {}/{} — already up to date. [job={}]", repo.owner(), repo.repo(), jobId);
-                jobStore.put(jobId, JobStatus.noChanges(jobId, request.githubUrl(), targetVersion));
-                return;
+                log.info("No changes for {}/{} — already at Java {}", repo.owner(), repo.repo(), targetJavaVersion);
+                return "No changes needed — %s/%s is already at Java %d."
+                    .formatted(repo.owner(), repo.repo(), targetJavaVersion);
             }
 
-            runCommand(cloneDir, "git add -A", gitEnv);
-            runCommand(cloneDir, "git commit -m 'chore: upgrade to Java " + targetVersion + "'", gitEnv);
+            runCommand(cloneDir, List.of("git", "add", "-A"), gitEnv);
+            runCommand(cloneDir, List.of("git", "commit", "-m", "chore: upgrade to Java " + targetJavaVersion), gitEnv);
 
             SecretScanner.ScanResult scan = secretScanner.scan(cloneDir, gitEnv);
             if (!scan.clean()) {
@@ -81,28 +82,32 @@ public class UpgradeOrchestrationService {
                     String.join("\n", scan.findings()));
             }
 
-            runCommand(cloneDir, "git push origin " + branchName, gitEnv);
+            runCommand(cloneDir, List.of("git", "push", "origin", branchName), gitEnv);
 
-            String prUrl = gitHubService.createPullRequest(repo, branchName, defaultBranch, targetVersion, agentSummary);
-            log.info("PR created for {}/{}: {} [job={}]", repo.owner(), repo.repo(), prUrl, jobId);
-            jobStore.put(jobId, JobStatus.succeeded(jobId, request.githubUrl(), targetVersion, prUrl));
+            String prUrl = gitHubService.createPullRequest(repo, branchName, defaultBranch, targetJavaVersion, agentSummary);
+            log.info("PR created for {}/{}: {}", repo.owner(), repo.repo(), prUrl);
+            return "Upgrade to Java %d complete. Pull request: %s".formatted(targetJavaVersion, prUrl);
 
         } catch (Exception e) {
-            String error = e.getMessage();
-            log.error("Upgrade failed for {} [job={}]: {}", request.githubUrl(), jobId, error, e);
-            String issueUrl = tryCreateFailureIssue(repo, request.githubUrl(), jobId, targetVersion, error);
-            jobStore.put(jobId, JobStatus.failed(jobId, request.githubUrl(), targetVersion, error, issueUrl));
+            String error = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            log.error("Upgrade failed for {}: {}", githubUrl, error, e);
+            String issueUrl = tryCreateFailureIssue(repo, githubUrl, targetJavaVersion, error);
+            String message = "Upgrade to Java %d failed for %s: %s".formatted(targetJavaVersion, githubUrl, error);
+            if (issueUrl != null) {
+                message += " Failure issue created: " + issueUrl;
+            }
+            throw new RuntimeException(message, e);
         } finally {
             cleanupTempDir(baseDir);
             cleanupTempDir(credHome);  // .netrc deleted here — token no longer on disk
         }
     }
 
-    private String tryCreateFailureIssue(GitHubService.RepoInfo repo, String githubUrl, String jobId,
-                                          int targetVersion, String error) {
+    private String tryCreateFailureIssue(GitHubService.RepoInfo repo, String githubUrl,
+                                          int targetJavaVersion, String error) {
         if (repo == null) return null;
         try {
-            String title = "[java-upgrader] Upgrade to Java " + targetVersion + " failed";
+            String title = "[java-upgrader] Upgrade to Java " + targetJavaVersion + " failed";
             String body = """
                 ## Java %d Upgrade Failed
 
@@ -118,38 +123,43 @@ public class UpgradeOrchestrationService {
 
                 - `GITHUB_TOKEN` has `repo` and `issues` write scope
                 - The repository is accessible and not archived
-                - Retry via `POST /api/upgrade` if the error looks transient
+                - Retry via the `upgrade_java` MCP tool if the error looks transient
 
                 ---
-                *job id: `%s` — generated by java-upgrader*
-                """.formatted(targetVersion, error, jobId);
+                *Generated by java-upgrader*
+                """.formatted(targetJavaVersion, error);
             String issueUrl = gitHubService.createIssue(repo, title, body);
-            log.info("Failure issue created: {} [job={}]", issueUrl, jobId);
+            log.info("Failure issue created: {}", issueUrl);
             return issueUrl;
         } catch (Exception ex) {
-            log.error("Also failed to create GitHub issue for {}/{} [job={}]: {}",
-                repo.owner(), repo.repo(), jobId, ex.getMessage());
+            log.error("Also failed to create GitHub issue for {}/{}: {}",
+                repo.owner(), repo.repo(), ex.getMessage());
             return null;
         }
     }
 
-    private String runCommand(Path workDir, String command) throws IOException, InterruptedException {
-        return runCommand(workDir, command, Map.of());
-    }
-
-    private String runCommand(Path workDir, String command, Map<String, String> extraEnv)
+    /**
+     * Executes a git command as a typed argument list — no shell interpolation, no injection risk.
+     * Package-private to allow spy-based unit testing without spawning real processes.
+     */
+    String runCommand(Path workDir, List<String> command, Map<String, String> extraEnv)
             throws IOException, InterruptedException {
-        ProcessBuilder pb = new ProcessBuilder("bash", "-c", command);
+        ProcessBuilder pb = new ProcessBuilder(command);
         pb.directory(workDir.toFile());
         pb.redirectErrorStream(true);
         pb.environment().putAll(extraEnv);
         Process proc = pb.start();
-        String output = new String(proc.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        int exitCode = proc.waitFor();
-        if (exitCode != 0) {
-            throw new RuntimeException("Command failed [exit " + exitCode + "]: " + command + "\n" + output);
+        try {
+            String output = new String(proc.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            int exitCode = proc.waitFor();
+            if (exitCode != 0) {
+                throw new RuntimeException("Command failed [exit " + exitCode + "]: "
+                    + String.join(" ", command) + "\n" + output);
+            }
+            return output;
+        } finally {
+            proc.destroyForcibly();
         }
-        return output;
     }
 
     private void cleanupTempDir(Path dir) {

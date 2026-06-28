@@ -34,14 +34,18 @@ public class SecretScanner {
     /** Runs {@code git show HEAD} on the cloned repo and scans the diff. */
     public ScanResult scan(Path repoDir, Map<String, String> gitEnv) {
         try {
-            ProcessBuilder pb = new ProcessBuilder("bash", "-c", "git show HEAD");
+            ProcessBuilder pb = new ProcessBuilder("git", "show", "HEAD");
             pb.directory(repoDir.toFile());
             pb.environment().putAll(gitEnv);
             pb.redirectErrorStream(true);
             Process proc = pb.start();
-            String diff = new String(proc.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-            proc.waitFor();
-            return scanDiff(diff);
+            try {
+                String diff = new String(proc.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+                proc.waitFor();
+                return scanDiff(diff);
+            } finally {
+                proc.destroyForcibly();
+            }
         } catch (IOException | InterruptedException e) {
             log.error("Secret scan could not run: {}", e.getMessage());
             // Fail-safe: block the push if the scan itself errors

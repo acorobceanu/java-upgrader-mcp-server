@@ -1,25 +1,27 @@
 # java-upgrader
 
-A Spring Boot service that automatically upgrades Java projects to modern Java versions using an AI agent powered by Claude. Submit a GitHub repository URL, and the service clones it, applies Java modernizations, and opens a pull request with the changes.
+An MCP server that automatically upgrades Java projects to modern Java versions using an AI agent powered by Claude. Connect it to Claude Desktop (or any MCP client), point it at a GitHub repository, and it clones the project, applies Java modernizations, and opens a pull request with the changes.
 
 ## How It Works
 
-1. **Submit** a GitHub repository URL via REST API
-2. **Agent runs** asynchronously: clones the repo, inspects the project, applies upgrades
-3. **Pull request** is opened on the target repository with all changes
-4. **Poll** the job status endpoint until the job succeeds, fails, or reports no changes needed
+1. **Call** `upgrade_java` with a GitHub repository URL — it returns a job ID immediately
+2. **Poll** `get_upgrade_status` with that job ID until the status is `COMPLETE` or `FAILED`
+3. **Agent runs** asynchronously in the background: clones the repo, inspects the project, applies upgrades
+4. **Pull request** is opened on the target repository with all changes
 
-The AI agent (Claude claude-opus-4-8) has four tools available: read files, write files, list files, and execute shell commands. It uses these to update `pom.xml`/`build.gradle`, apply modern Java language features, and report every change it makes.
+The AI agent (Claude Opus) has four tools: read files, write files, list files, and execute shell commands. It uses these to update `pom.xml`/`build.gradle`, apply modern Java language features, and report every change it makes.
+
+Upgrades run on a single background worker thread so concurrent calls queue rather than competing for disk and API quota.
 
 ## Features
 
-- **Async job processing** — HTTP responses return immediately with a job ID; upgrades run in the background
+- **MCP tool interface** — callable from Claude Desktop, Claude Code, or any MCP-compatible client
 - **Modern Java patterns** — applies `var`, text blocks, records, pattern matching, sealed classes, Stream API improvements, and more
-- **Configurable target version** — defaults to Java 21, configurable per request
+- **Configurable target version** — defaults to Java 21, configurable per call
 - **Automatic PRs and issues** — opens a PR on success, a GitHub issue with diagnostics on failure
 - **Secret scanning** — scans the git diff before every push to prevent accidental credential leaks
-- **Secure credential handling** — GitHub token stored in `.netrc` with `600` permissions; never passed as command-line args or environment variables visible to subprocesses
-- **Production-ready token sourcing** — GitHub token from environment variable (local) or AWS SSM Parameter Store (deployed)
+- **Secure credential handling** — GitHub token stored in `.netrc` with `600` permissions; never passed as command-line args
+- **Flexible token sourcing** — GitHub token from environment variable (local) or AWS SSM Parameter Store (deployed)
 
 ## Prerequisites
 
@@ -28,7 +30,7 @@ The AI agent (Claude claude-opus-4-8) has four tools available: read files, writ
 | Java | 17+ |
 | Maven | 3.6+ |
 | `ANTHROPIC_API_KEY` | Anthropic API key |
-| `GITHUB_TOKEN` | GitHub personal access token with `repo` scope |
+| `GITHUB_TOKEN` | GitHub personal access token with `repo` and `issues` scope |
 
 ## Quick Start
 
@@ -42,83 +44,120 @@ mvn clean install
 export ANTHROPIC_API_KEY=sk-ant-...
 export GITHUB_TOKEN=ghp_...
 
-# Start the service on port 8080
+# Start the MCP server on port 8080
 mvn spring-boot:run
 ```
 
-## API Reference
+The server starts and exposes the MCP SSE transport at `http://localhost:8080/sse`.
 
-### Submit an upgrade job
+## Connecting to Claude Desktop
 
-```
-POST /api/upgrade
-Content-Type: application/json
-```
-
-**Request body:**
+Add the following to your Claude Desktop `claude_desktop_config.json`:
 
 ```json
 {
-  "githubUrl": "https://github.com/owner/repo",
-  "targetJavaVersion": 21
+  "mcpServers": {
+    "java-upgrader": {
+      "url": "http://localhost:8080/sse"
+    }
+  }
 }
 ```
 
-`targetJavaVersion` is optional and defaults to `21`.
+Then ask Claude: *"Upgrade https://github.com/owner/my-app to Java 21"* and it will call the `upgrade_java` tool automatically.
 
-**Response — 202 Accepted:**
+## MCP Tool Reference
 
-```json
-{
-  "jobId": "a1b2c3d4-...",
-  "message": "Upgrade job accepted"
-}
+### `upgrade_java`
+
+Enqueues an asynchronous upgrade job and returns a job ID immediately.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `githubUrl` | string | yes | GitHub repository URL (HTTPS or SSH) |
+| `targetJavaVersion` | integer | no | Target Java version (default: `21`) |
+
+**Returns:** a message containing the job ID and polling instructions:
+```
+Job started. ID: f3dcdb08-78bb-46ad-9ad0-e83661debead
+Status: PENDING
+Poll with: get_upgrade_status("f3dcdb08-78bb-46ad-9ad0-e83661debead")
 ```
 
-### Poll job status
+### `get_upgrade_status`
 
-```
-GET /api/upgrade/{jobId}
-```
+Polls the status of a job submitted with `upgrade_java`.
 
-**Response:**
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `jobId` | string | yes | Job ID returned by `upgrade_java` |
 
-```json
-{
-  "id": "a1b2c3d4-...",
-  "state": "succeeded",
-  "prUrl": "https://github.com/owner/repo/pull/42",
-  "errorMessage": null,
-  "issueUrl": null
-}
-```
+**Returns** one of:
 
-| `state` | Meaning |
+| Status | Response |
 |---|---|
-| `pending` | Job is queued or running |
-| `succeeded` | PR was opened successfully |
-| `no_changes` | Project is already up to date |
-| `failed` | Agent or infrastructure error; see `issueUrl` for details |
+| `PENDING` | Job is queued and will start shortly |
+| `RUNNING` | Upgrade is in progress — check again in a minute |
+| `COMPLETE` | PR URL, or "No changes needed" message |
+| `FAILED` | Error details (plus a GitHub issue URL if one was created) |
 
-### Example: curl workflow
+## Demo Client
+
+`src/main/java/com/javaupgrader/demo/UpgradeClientDemo.java` is a standalone Java program that connects to the running MCP server and calls `upgrade_java` + `get_upgrade_status` programmatically — no MCP host (Claude Desktop, etc.) required. It uses the `io.modelcontextprotocol.sdk` client classes that are already on the classpath.
+
+```java
+var transport = HttpClientSseClientTransport.builder("http://localhost:8080")
+    .requestBuilder(HttpRequest.newBuilder().timeout(Duration.ofMinutes(15)))
+    .build();
+
+try (McpSyncClient client = McpClient.sync(transport)
+        .clientInfo(new Implementation("upgrade-client-demo", "1.0.0"))
+        .requestTimeout(Duration.ofMinutes(15))
+        .build()) {
+
+    client.initialize();
+
+    // Start the async job
+    CallToolResult submit = client.callTool(new CallToolRequest(
+        "upgrade_java",
+        Map.of("githubUrl", "https://github.com/acme/legacy-java8-app",
+               "targetJavaVersion", 21)
+    ));
+    String jobId = extractJobId(submit); // parse ID from the response text
+
+    // Poll until done
+    while (true) {
+        CallToolResult status = client.callTool(
+            new CallToolRequest("get_upgrade_status", Map.of("jobId", jobId)));
+        String text = ((TextContent) status.content().get(0)).text();
+        System.out.println(text);
+        if (text.startsWith("Status: COMPLETE") || text.startsWith("Status: FAILED")) break;
+        Thread.sleep(30_000);
+    }
+}
+```
+
+To run it, start the server first, then:
 
 ```bash
-# Submit a job
-JOB_ID=$(curl -s -X POST http://localhost:8080/api/upgrade \
-  -H "Content-Type: application/json" \
-  -d '{"githubUrl":"https://github.com/owner/my-java-app","targetJavaVersion":21}' \
-  | jq -r '.jobId')
+mvn exec:java -Dexec.mainClass=com.javaupgrader.demo.UpgradeClientDemo
+```
 
-# Poll until done
-while true; do
-  STATUS=$(curl -s http://localhost:8080/api/upgrade/$JOB_ID | jq -r '.state')
-  echo "State: $STATUS"
-  [ "$STATUS" != "pending" ] && break
-  sleep 10
-done
+Expected output:
 
-# Get the PR URL
-curl -s http://localhost:8080/api/upgrade/$JOB_ID | jq '.prUrl'
+```
+Connected to: java-upgrader v1.0.0
+Available tools: [upgrade_java, get_upgrade_status]
+
+Calling upgrade_java: https://github.com/acme/legacy-java8-app → Java 21
+Job started. ID: f3dcdb08-...
+Status: PENDING
+
+Status: RUNNING
+Upgrade is in progress — check again in a minute.
+
+Status: COMPLETE
+Upgrade to Java 21 complete. Pull request: https://github.com/acme/legacy-java8-app/pull/7
 ```
 
 ## Configuration
@@ -128,7 +167,8 @@ All configuration lives in `src/main/resources/application.properties`.
 | Property | Default | Description |
 |---|---|---|
 | `server.port` | `8080` | HTTP port |
-| `spring.mvc.async.request-timeout` | `600000` | Max async request timeout (ms) |
+| `spring.ai.mcp.server.name` | `java-upgrader` | MCP server name advertised to clients |
+| `spring.ai.mcp.server.version` | `1.0.0` | MCP server version |
 | `github.token.ssm-path` | _(unset)_ | AWS SSM parameter path for GitHub token (production) |
 
 When `github.token.ssm-path` is set, the service retrieves the token from SSM using the EC2 instance profile — no credentials need to be injected into the runtime environment. If unset, it falls back to the `GITHUB_TOKEN` environment variable.
@@ -158,33 +198,31 @@ The GitHub token is written to a temporary `.netrc` file with `600` permissions 
 java-upgrader/
 ├── pom.xml
 ├── .githooks/
-│   └── pre-push                     # Secret-scanning gate (auto-installed)
+│   └── pre-push                             # Secret-scanning gate (auto-installed)
 └── src/
     ├── main/java/com/javaupgrader/
     │   ├── JavaUpgraderApplication.java
     │   ├── agent/
-    │   │   └── JavaUpgraderAgent.java          # Claude agent + tool definitions
-    │   ├── controller/
-    │   │   └── UpgradeController.java           # POST /api/upgrade, GET /api/upgrade/{id}
+    │   │   └── JavaUpgraderAgent.java       # Claude agent + file/shell tool definitions
+    │   ├── mcp/
+    │   │   └── JavaUpgraderTools.java       # MCP tools: upgrade_java, get_upgrade_status
     │   ├── service/
-    │   │   ├── UpgradeOrchestrationService.java # End-to-end upgrade workflow
-    │   │   ├── GitHubService.java               # GitHub API + git operations
-    │   │   ├── SecretScanner.java               # Pre-push secret detection
-    │   │   └── JobStore.java                    # In-memory job state
-    │   ├── config/
-    │   │   ├── AnthropicConfig.java
-    │   │   ├── AsyncConfig.java
-    │   │   └── GitHubTokenConfig.java
-    │   └── dto/
-    │       ├── UpgradeRequest.java
-    │       ├── JobStatus.java
-    │       └── UpgradeAcceptedResponse.java
+    │   │   ├── JobStore.java                # In-memory job state (PENDING→RUNNING→COMPLETE/FAILED)
+    │   │   ├── UpgradeJobService.java       # Async submission + background worker thread
+    │   │   ├── UpgradeOrchestrationService.java  # End-to-end upgrade workflow (synchronous)
+    │   │   ├── GitHubService.java           # GitHub API + git operations
+    │   │   └── SecretScanner.java           # Pre-push secret detection
+    │   └── config/
+    │       ├── AnthropicConfig.java
+    │       └── GitHubTokenConfig.java
     └── test/java/com/javaupgrader/
-        ├── controller/UpgradeControllerTest.java
+        ├── config/SecurityConfigTest.java
+        ├── mcp/JavaUpgraderToolsTest.java
         └── service/
+            ├── JobStoreTest.java
+            ├── UpgradeJobServiceTest.java
             ├── GitHubServiceTest.java
-            ├── SecretScannerTest.java
-            └── JobStoreTest.java
+            └── SecretScannerTest.java
 ```
 
 ## Development
@@ -205,7 +243,7 @@ Tests use JUnit 5 and Mockito. Per project convention, every code change must be
 
 ## Deployment
 
-The service is stateless (job state is in-memory) and packages as a single executable JAR. For production use on AWS Lightsail (or any EC2-compatible instance):
+The service packages as a single executable JAR. For production use on AWS Lightsail (or any EC2-compatible instance):
 
 1. Attach an IAM instance profile with `ssm:GetParameter` on your token path.
 2. Set `github.token.ssm-path=/your/ssm/param` in `application.properties` or as a system property.

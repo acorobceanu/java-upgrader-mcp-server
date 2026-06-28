@@ -29,12 +29,11 @@ public class GitHubService {
         Pattern.compile("github\\.com[:/]([^/]+)/([^/]+?)(\\.git)?$");
 
     private final String githubToken;
-    private final ObjectMapper objectMapper;
+    private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient;
 
-    public GitHubService(@Qualifier("githubToken") String githubToken, ObjectMapper objectMapper) {
+    public GitHubService(@Qualifier("githubToken") String githubToken) {
         this.githubToken = githubToken;
-        this.objectMapper = objectMapper;
         this.httpClient = HttpClient.newHttpClient();
     }
 

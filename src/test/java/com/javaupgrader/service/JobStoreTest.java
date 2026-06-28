@@ -1,9 +1,7 @@
 package com.javaupgrader.service;
 
-import com.javaupgrader.dto.JobStatus;
+import com.javaupgrader.service.JobStore.Status;
 import org.junit.jupiter.api.Test;
-
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -12,37 +10,58 @@ class JobStoreTest {
     private final JobStore store = new JobStore();
 
     @Test
-    void get_unknownJobId_returnsEmpty() {
-        assertTrue(store.get("nonexistent").isEmpty());
+    void create_returnsNonBlankId() {
+        assertFalse(store.create().isBlank());
     }
 
     @Test
-    void put_thenGet_returnsStatus() {
-        var status = JobStatus.pending("job-1", "https://github.com/o/r", 21);
-        store.put("job-1", status);
-        assertEquals(Optional.of(status), store.get("job-1"));
+    void create_returnsUniqueIds() {
+        assertNotEquals(store.create(), store.create());
     }
 
     @Test
-    void put_overwritesExistingEntry() {
-        store.put("job-1", JobStatus.pending("job-1", "https://github.com/o/r", 21));
-        var succeeded = JobStatus.succeeded("job-1", "https://github.com/o/r", 21, "https://github.com/o/r/pull/1");
-        store.put("job-1", succeeded);
-        assertEquals("succeeded", store.get("job-1").get().state());
+    void create_initialStatusIsPending() {
+        var job = store.get(store.create()).orElseThrow();
+        assertEquals(Status.PENDING, job.status());
+        assertNull(job.result());
+        assertNull(job.error());
     }
 
     @Test
-    void failedJobWithIssue_issueUrlPresent() {
-        var status = JobStatus.failed("job-2", "https://github.com/o/r", 21,
-            "push failed", "https://github.com/o/r/issues/3");
-        store.put("job-2", status);
-        assertEquals("https://github.com/o/r/issues/3", store.get("job-2").get().issueUrl());
+    void markRunning_updatesStatus() {
+        String id = store.create();
+        store.markRunning(id);
+        assertEquals(Status.RUNNING, store.get(id).orElseThrow().status());
     }
 
     @Test
-    void failedJobWithoutIssue_issueUrlIsNull() {
-        var status = JobStatus.failed("job-3", "https://github.com/o/r", 21, "token missing", null);
-        store.put("job-3", status);
-        assertNull(store.get("job-3").get().issueUrl());
+    void markComplete_updatesStatusAndResult() {
+        String id = store.create();
+        store.markComplete(id, "PR: https://github.com/owner/repo/pull/1");
+        var job = store.get(id).orElseThrow();
+        assertEquals(Status.COMPLETE, job.status());
+        assertEquals("PR: https://github.com/owner/repo/pull/1", job.result());
+        assertNull(job.error());
+    }
+
+    @Test
+    void markFailed_updatesStatusAndError() {
+        String id = store.create();
+        store.markFailed(id, "Clone failed: authentication error");
+        var job = store.get(id).orElseThrow();
+        assertEquals(Status.FAILED, job.status());
+        assertEquals("Clone failed: authentication error", job.error());
+        assertNull(job.result());
+    }
+
+    @Test
+    void get_unknownId_returnsEmpty() {
+        assertTrue(store.get("no-such-id").isEmpty());
+    }
+
+    @Test
+    void markRunning_unknownId_doesNothing() {
+        store.markRunning("no-such-id"); // must not throw
+        assertTrue(store.get("no-such-id").isEmpty());
     }
 }

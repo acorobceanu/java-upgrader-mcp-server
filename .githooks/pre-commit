@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Blocks git commit unless the code-security-reviewer agent has approved the
+# current staged changes.
+#
+# How it works:
+#   1. After a successful security review, the code-security-reviewer agent
+#      writes .security-review containing the staged-tree hash (git write-tree).
+#   2. This hook re-computes the current staged-tree hash and compares.
+#      Match  → allow commit.
+#      Mismatch / file absent → block and explain.
+#
+# Auto-installed on every mvn initialize (see pom.xml maven-antrun-plugin).
+# Emergency bypass: git commit --no-verify
+
+set -uo pipefail
+
+APPROVAL_FILE=".security-review"
+
+if [ ! -f "$APPROVAL_FILE" ]; then
+    echo "❌ Commit blocked: no security-review approval found." >&2
+    echo "   Run the code-security-reviewer agent (after test-suite-runner passes) and try again." >&2
+    echo "   Emergency bypass: git commit --no-verify" >&2
+    exit 1
+fi
+
+APPROVED_TREE=$(grep '^tree=' "$APPROVAL_FILE" | cut -d= -f2)
+CURRENT_TREE=$(git write-tree)
+
+if [ "$APPROVED_TREE" != "$CURRENT_TREE" ]; then
+    echo "❌ Commit blocked: staged changes differ from the reviewed snapshot." >&2
+    echo "   Approved tree : $APPROVED_TREE" >&2
+    echo "   Current tree  : $CURRENT_TREE" >&2
+    echo "   Re-run the code-security-reviewer agent after staging your latest changes." >&2
+    echo "   Emergency bypass: git commit --no-verify" >&2
+    exit 1
+fi
+
+TIMESTAMP=$(grep '^timestamp=' "$APPROVAL_FILE" | cut -d= -f2)
+echo "✅ Security review approved (reviewed at $TIMESTAMP) — commit allowed."
+exit 0
