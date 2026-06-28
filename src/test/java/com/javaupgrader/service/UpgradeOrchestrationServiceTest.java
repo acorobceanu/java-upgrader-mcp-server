@@ -98,7 +98,7 @@ class UpgradeOrchestrationServiceTest {
         when(agent.run(anyString(), eq(TARGET_VERSION))).thenReturn("summary");
         when(scanner.scan(any(), anyMap()))
                 .thenReturn(new SecretScanner.ScanResult(
-                        false, List.of("line 5: ghp_faketoken1234567890123456789012345678")));
+                        false, List.of("line 5: [REDACTED_TOKEN_FOR_TESTING]")));
 
         UpgradeOrchestrationService service = spy(new UpgradeOrchestrationService(gh, agent, scanner));
 
